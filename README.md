@@ -4,8 +4,8 @@
 - Harsh Singhal (Amazon.com Services LLC)
 
 ## Participate
-- [GitHub Repository](https://github.com/harsh0/xss-mitigation-explainer) (xss-mitigation-explainer)
-- [Issues](https://github.com/harsh0/xss-mitigation-explainer/issues) (placeholder)
+- [GitHub Repository](https://github.com/Harsh0/xss-mitigation-explainer)
+- [Issues](https://github.com/Harsh0/xss-mitigation-explainer/issues)
 
 ## Table of Contents
 - [Introduction](#introduction)
@@ -65,6 +65,7 @@ A new cookie attribute that creates tab-specific, HttpOnly cookies with these pr
 - Automatically destroyed on tab close/refresh
 - Cannot be accessed by JavaScript (HttpOnly)
 - Transmitted only over secure connections (Secure)
+- **Shared with same-origin iframes**: Same-origin iframes within the tab must inherit the parent's TabOnly cookie to prevent XSS iframe injection attacks that attempt to obtain separate tokens
 
 ### 2. Cryptographic Token Pairing System
 A client-server cryptographic system that:
@@ -132,6 +133,7 @@ The `TabOnly` attribute would be implemented by browsers to:
 - Isolate cookie storage per browser tab
 - Prevent cross-tab cookie sharing
 - Automatically cleanup on tab destruction
+- **Ensure same-origin iframe inheritance**: Same-origin iframes must share the parent tab's TabOnly cookies to maintain security boundaries
 
 ### Token Generation Algorithm
 ```javascript
@@ -171,17 +173,18 @@ async function requestTabToken() {
   return new TextDecoder().decode(decryptedToken);
 }
 
-// Server-side pseudocode
+// Server-side pseudocode (stateless design)
 function generateTabToken(request) {
   const { publicKey } = request.body;
   const tabCookie = request.cookies.tab_id;
   
-  if (tabCookie && isTokenIssued(tabCookie)) {
+  if (tabCookie) {
+    // Tab already has a cookie - reject duplicate token requests
     throw new Error('Token already issued for this tab');
   }
   
-  const tabId = tabCookie || generateUniqueId();
-  const token = generateSecureToken(tabId);
+  const tabId = generateUniqueId();
+  const token = generateSecureTokenPairedWith(tabId); // Token bound to tabId
   
   // Encrypt token with client's public key
   const encryptedToken = encrypt(token, publicKey);
@@ -194,7 +197,7 @@ function generateTabToken(request) {
 
 ### Request Validation
 ```javascript
-// Server-side pseudocode
+// Server-side pseudocode (stateless validation)
 function validateRequest(request) {
   const tabCookie = request.cookies.tab_id;
   const token = request.headers['x-xss-token'];
@@ -203,6 +206,7 @@ function validateRequest(request) {
     return false;
   }
   
+  // Verify token is bound to this tab's cookie
   return validateTokenForTab(token, tabCookie);
 }
 ```
@@ -213,6 +217,7 @@ Browsers would need to implement:
 - Tab-specific cookie storage mechanisms
 - Automatic cleanup on tab close/refresh
 - Isolation between tabs for `TabOnly` cookies
+- **Same-origin iframe cookie inheritance**: Ensure iframes share parent tab's TabOnly cookies
 
 ## Considered Alternatives
 
@@ -253,7 +258,7 @@ Browsers would need to implement:
 **What TITP Protects Against:**
 - Token theft and reuse by XSS scripts
 - Cross-tab token sharing
-- Malicious developers bypassing their own security systems
+- Legitimate developers bypassing security (even with full system knowledge)
 - Request forgery without proper tab context
 
 **What TITP Does NOT Protect Against:**
@@ -261,6 +266,13 @@ Browsers would need to implement:
 - Client-side DOM manipulation
 - Social engineering attacks
 - Server-side vulnerabilities
+- **Traditional HTML form submissions** (`<form>` tags cannot include custom headers)
+- **Image and script requests** (`<img>`, `<script>` tags, though these are typically non-sensitive)
+
+**Architectural Requirements:**
+- Applications must use JavaScript (fetch/XHR) for sensitive operations
+- Traditional form submissions must be converted to JavaScript-based requests
+- Custom headers are required for token validation
 
 **Key Insight**: The protocol's strength is not in preventing all XSS behavior, but in ensuring that **only requests from the legitimate tab context with proper cryptographic proof are accepted by the backend**.
 
@@ -283,6 +295,24 @@ Browsers would need to implement:
 
 ## Implementation Considerations
 
+### Request Type Limitations
+
+**Elements Not Protected by TITP:**
+- **HTML Forms**: `<form>` submissions cannot include custom headers required for token validation
+- **Image Requests**: `<img src="">` cannot carry tokens (typically non-sensitive operations)
+- **Script Requests**: `<script src="">` cannot carry tokens (typically non-sensitive operations)
+- **Other HTML Elements**: Any element that cannot include custom headers
+
+**Architectural Requirements:**
+- Sensitive operations must use JavaScript (fetch/XHR) with custom headers
+- Traditional form submissions require conversion to JavaScript-based requests
+- Applications must distinguish between sensitive and non-sensitive request types
+
+**Mitigation Strategies:**
+- Convert critical forms to JavaScript: `form.addEventListener('submit', e => { e.preventDefault(); fetch(...) })`
+- Use TITP for API calls, traditional CSRF protection for remaining forms
+- Accept reduced protection for truly non-sensitive operations (image loading, etc.)
+
 ### Deployment Strategy
 1. **Progressive Enhancement**: Graceful degradation when `TabOnly` unsupported
 2. **Framework Integration**: Support in React, Angular, Vue.js
@@ -290,7 +320,8 @@ Browsers would need to implement:
 
 ### Performance Impact
 - **Minimal Overhead**: Single additional cookie and token validation
-- **Scalable**: Stateless implementation possible with signed tokens
+- **Stateless Design**: No backend token storage required - tokens paired with cookies
+- **Scalable**: Validation through verification only
 - **Caching**: Token validation can be optimized with caching
 
 ### Backward Compatibility
